@@ -51,6 +51,21 @@ node hinge.mjs --self-test        # 5-check built-in test
 
 Hinge only reads text. Proposed probes are printed, never executed. Run it as a pre-flight before expanding work behind a plan — cheaper than discovering the load-bearing assumption three days in.
 
+### hinge as a Claude Code skill
+
+Hinge also ships as a [Claude Code skill](https://code.claude.com/docs/en/skills) at [`skills/hinge/`](skills/hinge/), so the pre-flight can run inside an agent session (`/hinge`, or triggered when you're about to build behind a plan). The skill folder is self-contained — it carries a byte-identical copy of `hinge.mjs`, and a repo test fails closed if the copy ever drifts from the canonical root file.
+
+Install by copying the folder:
+
+```bash
+# project-scoped
+cp -r skills/hinge your-repo/.claude/skills/hinge
+# or user-scoped
+cp -r skills/hinge ~/.claude/skills/hinge
+```
+
+The skill keeps the tool's own discipline: the deterministic scorer is the authority (the agent may disagree, but must label its own judgment as such), probes are surfaced rather than auto-executed, and "no hinge found" is reported honestly instead of inventing one.
+
 ## git-safe-push.mjs — don't ship someone else's commits
 
 Born from a real incident: on a shared checkout, a plain `git push` from one agent session shipped two commits belonging to a *different* concurrent session — commits still awaiting their owner's go-ahead. `git push` operates at the branch level: whoever pushes ships **every** local-only commit, not just their own.

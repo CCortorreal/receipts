@@ -14,6 +14,6 @@
     "git-safe-push": "./git-safe-push.mjs"
   },
   "scripts": {
-    "test": "node --test test/witness.test.mjs test/hinge.test.mjs"
+    "test": "node --test test/witness.test.mjs test/hinge.test.mjs test/skill.test.mjs"
   }
 }
