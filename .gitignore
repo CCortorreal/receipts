@@ -1,2 +1,5 @@
 .witness/
 node_modules/
+.witness/
+*.tip.json
+node_modules/

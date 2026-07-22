@@ -46,10 +46,11 @@
 
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, appendFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 const GENESIS = 'GENESIS';
+const ENTRY_SCHEMA_V2 = 'witness-entry/v2';   // see canonicalize() for why the version is load-bearing
 const MAX_TAIL = 4000; // chars of stdout/stderr kept verbatim per receipt
 
 // ---------------------------------------------------------------- small cli plumbing
@@ -85,16 +86,44 @@ function sha256(buf) {
 
 function canonicalize(entry) {
   // Fixed field order so the hash is deterministic regardless of how the object was built.
-  const order = [
-    'index', 'ts', 'cwd', 'command', 'exitCode', 'durationMs',
-    'stdoutSha256', 'stdoutBytes', 'stderrSha256', 'stderrBytes', 'prevHash',
-  ];
+  // SCHEMA v2 (2026-07-22): v1 hashed stdoutSha256/stdoutBytes but NOT stdoutTail/stderrTail — so the
+  // human-readable record of what a command printed could be edited freely and still verify. The
+  // tails are the field a person actually READS, which made them the most useful thing to forge and
+  // the only unauthenticated thing in the entry. v2 covers them.
+  //
+  // The version split is load-bearing, not ceremony: adding fields to the canonical form changes
+  // every hash, so canonicalizing old entries the new way would mark every pre-existing ledger
+  // BROKEN. An entry is hashed under the form it was WRITTEN under — v1 entries stay verifiable
+  // forever, v2 entries authenticate their tails. Never "upgrade" an old entry in place; that is
+  // indistinguishable from tampering, which is the whole thing this file exists to detect.
+  const order = entry.schema === ENTRY_SCHEMA_V2
+    ? ['schema', 'index', 'ts', 'cwd', 'command', 'exitCode', 'durationMs',
+       'stdoutSha256', 'stdoutBytes', 'stdoutTail', 'stderrSha256', 'stderrBytes', 'stderrTail', 'prevHash']
+    : ['index', 'ts', 'cwd', 'command', 'exitCode', 'durationMs',
+       'stdoutSha256', 'stdoutBytes', 'stderrSha256', 'stderrBytes', 'prevHash'];
   return order.map(k => (typeof entry[k] === 'object' ? JSON.stringify(entry[k]) : String(entry[k]))).join('');
+}
+
+// A read that FAILS is not a read that returns nothing. existsSync only guards absence; EISDIR,
+// EACCES, EPERM and friends used to escape as an uncaught exception, so `verify` died with a Node
+// stack trace instead of reporting BROKEN — and under --json printed zero bytes, leaving a consumer
+// unable to tell "chain broken" from "tool crashed". Fail closed, in the tool's own vocabulary.
+class LedgerUnreadable extends Error {
+  constructor(file, cause) {
+    super(`ledger unreadable: ${cause.code || cause.message} at ${file}`);
+    this.name = 'LedgerUnreadable';
+    this.code = cause.code || 'EUNREADABLE';
+  }
 }
 
 function readLedger(file) {
   if (!existsSync(file)) return [];
-  const raw = readFileSync(file, 'utf8');
+  let raw;
+  try {
+    raw = readFileSync(file, 'utf8');
+  } catch (err) {
+    throw new LedgerUnreadable(file, err);
+  }
   const lines = raw.split(/\r?\n/).filter(l => l.trim().length);
   const entries = [];
   for (const line of lines) {
@@ -107,6 +136,35 @@ function readLedger(file) {
     }
   }
   return entries;
+}
+
+// THE TIP ANCHOR — the fix for silent tail truncation.
+//
+// A hash chain only proves that the entries you CAN see follow each other. It says nothing about how
+// many there were. Delete whole records off the end and what remains is a shorter, perfectly valid
+// chain: verify used to answer "Chain intact." That is a false green, and it is the easiest possible
+// attack — a truncate, not an edit.
+//
+// The anchor is a sidecar holding {count, tipHash}. Verify cross-checks it, so removing entries now
+// requires a second, consistent edit to a second file.
+//
+// HONEST LIMIT, stated here and in the README: the sidecar is a plain local file. Anyone who can
+// rewrite the ledger can rewrite this too. It defeats accidental truncation, log-rotation damage,
+// and single-step tampering — it is NOT a defence against a determined local attacker. Nothing
+// stored beside the data can be; that needs an off-box witness (a signature, or the hash pushed
+// somewhere you don't control). Don't let this file imply more than it does.
+function tipPath(file) { return `${file}.tip.json`; }
+
+function writeTip(file, entries) {
+  const tip = { schema: 'witness-tip/v1', count: entries.length, tipHash: entries.length ? entries[entries.length - 1].hash : GENESIS };
+  try { writeFileSync(tipPath(file), JSON.stringify(tip) + '\n', 'utf8'); }
+  catch { /* a ledger that appends but can't anchor is still better than no ledger; verify reports the gap */ }
+}
+
+function readTip(file) {
+  const p = tipPath(file);
+  if (!existsSync(p)) return null;
+  try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return { __unparseable: true }; }
 }
 
 function appendEntry(file, entry) {
@@ -153,6 +211,7 @@ async function cmdRun(args) {
 
   const durationMs = Date.now() - start;
   const entry = {
+    schema: ENTRY_SCHEMA_V2,
     index, ts: new Date().toISOString(), cwd, command,
     exitCode: code, durationMs,
     stdoutSha256: sha256(stdout), stdoutBytes: stdout.length,
@@ -163,6 +222,7 @@ async function cmdRun(args) {
   };
   entry.hash = sha256(canonicalize(entry));
   appendEntry(file, entry);
+  writeTip(file, [...existing, entry]);   // anchor the new length + tip so truncation can be caught
 
   const verdict = code === 0 ? c.green('PASS') : c.red(`FAIL (exit ${code})`);
   process.stderr.write(`witness: receipt #${index} ${verdict} — ${durationMs}ms — ${entry.hash.slice(0, 12)}  (${file})\n`);
@@ -176,7 +236,22 @@ function cmdVerify(args) {
   const { value: sinceRaw } = extractFlag(args, '--since', true);
   const since = sinceRaw ? parseInt(sinceRaw, 10) : 0;
 
-  const entries = readLedger(file);
+  let entries;
+  try {
+    entries = readLedger(file);
+  } catch (err) {
+    // Unreadable is BROKEN, reported in the tool's own vocabulary — never a raw stack trace, and
+    // never an empty --json body that a caller can't distinguish from a crash.
+    if (asJson) {
+      console.log(JSON.stringify({ schema: 'witness-verify/v1', file, ok: false, length: null,
+        brokenAt: null, reason: 'unreadable', code: err.code, details: [] }, null, 2));
+    } else {
+      console.log(`${c.bold('witness verify')} — ${file}`);
+      console.log(`  ${c.red('BROKEN')} — ${err.message}`);
+    }
+    process.exitCode = 1;
+    return;
+  }
   let brokenAt = null;
   const details = [];
 
@@ -195,9 +270,36 @@ function cmdVerify(args) {
     details.push({ index: i, status: 'ok' });
   }
 
-  const ok = brokenAt === null;
+  // THE ANCHOR CHECK — catches truncation, which the chain alone cannot see (a shorter chain is
+  // still a valid chain). Only meaningful when the chain itself verified: if the chain is already
+  // broken, that is the more specific finding and gets reported first.
+  const tip = readTip(file);
+  let anchor = null;
+  if (!tip) {
+    // No sidecar: a ledger written before anchoring existed, or one whose anchor was removed. Say so
+    // plainly rather than implying a guarantee we can't make — but don't fail a legacy ledger.
+    anchor = { status: 'absent', note: 'no tip anchor — truncation cannot be detected for this ledger' };
+  } else if (tip.__unparseable) {
+    anchor = { status: 'unparseable' };
+  } else if (tip.count !== entries.length) {
+    anchor = { status: 'count-mismatch', expected: tip.count, found: entries.length };
+  } else if (entries.length && tip.tipHash !== entries[entries.length - 1].hash) {
+    anchor = { status: 'tip-mismatch', expected: tip.tipHash, found: entries[entries.length - 1].hash };
+  } else {
+    anchor = { status: 'ok' };
+  }
+  const anchorBroken = anchor.status === 'count-mismatch' || anchor.status === 'tip-mismatch' || anchor.status === 'unparseable';
+
+  const ok = brokenAt === null && !anchorBroken;
   if (asJson) {
-    console.log(JSON.stringify({ schema: 'witness-verify/v1', file, ok, length: entries.length, brokenAt, details }, null, 2));
+    console.log(JSON.stringify({ schema: 'witness-verify/v1', file, ok, length: entries.length, brokenAt, anchor, details }, null, 2));
+  } else if (anchorBroken && brokenAt === null) {
+    console.log(`${c.bold('witness verify')} — ${file}`);
+    console.log(`  ${entries.length} receipt(s) in the ledger.`);
+    for (const d of details) if (d.status === 'ok') console.log(`  ${c.green('OK')}   #${d.index}`);
+    console.log(`\n  ${c.red('BROKEN')} — anchor ${anchor.status}: expected ${anchor.expected}, found ${anchor.found}.`);
+    console.log(`  ${c.dim('Every remaining receipt verifies, so entries were REMOVED from the end (or the anchor was edited).')}`);
+    process.exitCode = 1;
   } else {
     console.log(`${c.bold('witness verify')} — ${file}`);
     console.log(`  ${entries.length} receipt(s) in the ledger.`);

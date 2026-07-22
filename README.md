@@ -18,6 +18,10 @@ Each tool is a single `.mjs` file. Node builtins only — no `package.json` inst
 
 Every command run through witness is appended to an append-only ledger (`.witness/ledger.jsonl`) as a chained hash: each entry's hash covers its own fields **and** the previous entry's hash, so the ledger is tamper-evident the same way a git log is. Edit or delete any past line and `verify` reports the exact index where the chain breaks — and refuses to trust anything after it.
 
+A chain alone proves that the entries you can *see* follow each other; it says nothing about how many there were. So `verify` also cross-checks a **tip anchor** sidecar (`<ledger>.tip.json`, holding `{count, tipHash}`) — otherwise deleting whole records off the end would leave a shorter, perfectly valid chain that verifies clean.
+
+**What this does and does not protect against — plainly.** The anchor defeats accidental truncation, log-rotation damage, and single-step tampering: removing entries now requires a second, consistent edit to a second file. It is **not** a defence against a determined local attacker, because the sidecar is an ordinary local file that anyone able to rewrite the ledger can also rewrite. No artifact stored *beside* the data can give you more than that; real tamper-*proofing* needs an off-box witness — a signature you hold elsewhere, or the tip hash pushed somewhere you don't control. Ledgers written before the anchor existed still verify, and `verify` reports `anchor: absent` for them rather than implying a guarantee it can't make.
+
 ```bash
 node witness.mjs run -- npm test          # record a receipt (argv exact, no shell)
 node witness.mjs run --shell -- npm test  # via the platform shell (pipes, globs, .cmd shims)
@@ -28,7 +32,7 @@ node witness.mjs verify                   # walk the whole chain, fail-closed
 
 Design choices worth stealing:
 
-- **Fail-closed verify.** One hash mismatch → `BROKEN`, never "mostly fine." An unparseable or truncated ledger line is itself a tamper signal, not something to skip.
+- **Fail-closed verify.** One hash mismatch → `BROKEN`, never "mostly fine." An unparseable or truncated ledger line is itself a tamper signal, not something to skip. A ledger that cannot be *read at all* (a directory, bad permissions) is `BROKEN` too — reported in the tool's own vocabulary, with well-formed output under `--json`, never a raw stack trace.
 - **No shell by default.** Commands run as an argv array via `spawn(cmd, args)` — no injection surface, quoting survives exactly as typed. `--shell` is the deliberate, named trade for pipes and npm's `.cmd` shims (with Windows' documented cmd.exe re-quoting caveat called out in the source).
 - **Deterministic core.** sha256 + fs. No network, no LLM, no API key, no "trust me" step.
 
