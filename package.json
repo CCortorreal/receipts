@@ -1,0 +1,16 @@
+{
+  "name": "receipts-tools",
+  "version": "0.1.0",
+  "description": "Small, zero-dependency, fail-closed tools for agent-assisted development.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Carlos Cortorreal",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "witness": "./witness.mjs",
+    "hinge": "./hinge.mjs",
+    "git-safe-push": "./git-safe-push.mjs"
+  }
+}

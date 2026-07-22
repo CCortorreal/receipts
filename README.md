@@ -1,0 +1,74 @@
+# receipts
+
+Small, zero-dependency, fail-closed tools for agent-assisted development.
+
+The common thesis: when an agent (or a tired human) says *"I ran the tests and they passed"* or *"this plan is solid"* or *"I'm only pushing my own work"*, that sentence is not evidence. These tools replace the sentence with a **receipt** — something you can verify after the fact, that fails **closed** (loud, blocking, exact) instead of open (silent, "probably fine").
+
+Each tool is a single `.mjs` file. Node builtins only — no `package.json` install step, no lockfile, no supply chain. Copy the file you want, or clone the repo.
+
+| Tool | One line |
+|---|---|
+| [`witness.mjs`](witness.mjs) | Hash-chained receipt ledger for shell commands — prove "that actually ran, and nothing was edited since." |
+| [`hinge.mjs`](hinge.mjs) | Reads a Markdown plan, surfaces the most load-bearing **unverified** claim, and proposes the smallest falsifiable probe. |
+| [`git-safe-push.mjs`](git-safe-push.mjs) | Blocks a `git push` from silently shipping another concurrent session's commits. |
+
+---
+
+## witness.mjs — receipts for commands
+
+Every command run through witness is appended to an append-only ledger (`.witness/ledger.jsonl`) as a chained hash: each entry's hash covers its own fields **and** the previous entry's hash, so the ledger is tamper-evident the same way a git log is. Edit or delete any past line and `verify` reports the exact index where the chain breaks — and refuses to trust anything after it.
+
+```bash
+node witness.mjs run -- npm test          # record a receipt (argv exact, no shell)
+node witness.mjs run --shell -- npm test  # via the platform shell (pipes, globs, .cmd shims)
+node witness.mjs log                      # human-readable history
+node witness.mjs show 3                   # full stdout/stderr for receipt #3
+node witness.mjs verify                   # walk the whole chain, fail-closed
+```
+
+Design choices worth stealing:
+
+- **Fail-closed verify.** One hash mismatch → `BROKEN`, never "mostly fine." An unparseable or truncated ledger line is itself a tamper signal, not something to skip.
+- **No shell by default.** Commands run as an argv array via `spawn(cmd, args)` — no injection surface, quoting survives exactly as typed. `--shell` is the deliberate, named trade for pipes and npm's `.cmd` shims (with Windows' documented cmd.exe re-quoting caveat called out in the source).
+- **Deterministic core.** sha256 + fs. No network, no LLM, no API key, no "trust me" step.
+
+This is not a security sandbox — it's a memory aid with a math proof attached.
+
+## hinge.mjs — find the sentence your plan leans on
+
+Plans fail at the claim everything else quietly depends on: *"the library will provide stable readings"*, *"the API supports batch writes"*. Hinge parses a Markdown plan, scores every statement on foundation-language, uncertainty-language, visible evidence, and how many later statements lean on its terms — and prints the single most load-bearing **unverified** claim, with citations and the smallest probe that would falsify it.
+
+```bash
+node hinge.mjs plan.md            # the hinge claim + dependents + suggested probe
+node hinge.mjs --demo             # worked example, no file needed
+node hinge.mjs --json plan.md     # machine-readable
+node hinge.mjs --self-test        # 5-check built-in test
+```
+
+Hinge only reads text. Proposed probes are printed, never executed. Run it as a pre-flight before expanding work behind a plan — cheaper than discovering the load-bearing assumption three days in.
+
+## git-safe-push.mjs — don't ship someone else's commits
+
+Born from a real incident: on a shared checkout, a plain `git push` from one agent session shipped two commits belonging to a *different* concurrent session — commits still awaiting their owner's go-ahead. `git push` operates at the branch level: whoever pushes ships **every** local-only commit, not just their own.
+
+The guard classifies everything in `<upstream>..HEAD` by its `Session-Id:` commit trailer — `mine` / `foreign` / `unstamped` — and loud-halts (exit 1) if a foreign-session commit, or more than one session's commits, would ship:
+
+```bash
+node git-safe-push.mjs                    # verdict for the current repo/branch
+node git-safe-push.mjs --json             # classified payload
+node git-safe-push.mjs --advisory         # never blocks — surface-only, for a soft pre-push hook
+```
+
+Run standalone before pushing, or wire it as a git `pre-push` hook. It resolves the current session id from `--sid` or `CLAUDE_CODE_SESSION_ID` / `CLAUDE_SESSION_ID` / `HAPPY_SESSION_ID`. Deliberately *not* zealous: unstamped commits (the pre-adoption baseline) warn instead of block, so the guard survives contact with a real repo and hardens automatically as your tooling starts stamping commits.
+
+---
+
+## Provenance
+
+These tools come out of my multi-agent development workshop — different model lanes (Claude, Codex) are given a problem and freedom, and what they produce is verified by hand before anything ships: witness had to catch a deliberately forged receipt, hinge had to pass its self-test *and* catch a real unverified claim in one of my own plans. The verification step is the point; it's the same thesis the tools themselves encode.
+
+More on the approach: [writing.cortorreal.fun](https://writing.cortorreal.fun/)
+
+## License
+
+[MIT](LICENSE)
