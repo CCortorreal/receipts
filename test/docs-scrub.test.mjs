@@ -55,3 +55,9 @@ test('no tracked file carries a private-infra reference', () => {
   }
   assert.deepStrictEqual(hits, [], `private-infra reference(s) found:\n  ${hits.join('\n  ')}`);
 });
+
+test('npm publication uses an explicit allowlist', () => {
+  const pkg = JSON.parse(readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+  assert.deepStrictEqual(pkg.files, ['*.mjs', 'BOOTSTRAP.md', 'skills/', 'test/']);
+  assert.ok(pkg.files.every(rel => !rel.startsWith('.')), 'hidden worktree state must never be published');
+});
