@@ -10,6 +10,7 @@ Each tool is a single `.mjs` file. Node builtins only — no `package.json` inst
 |---|---|
 | [`witness.mjs`](witness.mjs) | Hash-chained receipt ledger for shell commands — prove "that actually ran, and nothing was edited since." |
 | [`hinge.mjs`](hinge.mjs) | Reads a Markdown plan, surfaces the most load-bearing **unverified** claim, and proposes the smallest falsifiable probe. |
+| [`evidence.mjs`](evidence.mjs) | Lints `EVIDENCE` comments on claims in Markdown docs — rung, blind spot, episode count, dependency chain — and fails closed on an unearned confidence. |
 | [`git-safe-push.mjs`](git-safe-push.mjs) | Blocks a `git push` from silently shipping another concurrent session's commits. |
 
 ---
@@ -65,6 +66,58 @@ cp -r skills/hinge ~/.claude/skills/hinge
 ```
 
 The skill keeps the tool's own discipline: the deterministic scorer is the authority (the agent may disagree, but must label its own judgment as such), probes are surfaced rather than auto-executed, and "no hinge found" is reported honestly instead of inventing one.
+
+## evidence.mjs — machine-checkable confidence
+
+A doc asserts something as fact, and months later nobody — human or agent — can tell whether that
+was a hunch, one observation, or something actually nailed down. `evidence.mjs` reads an
+`EVIDENCE` HTML comment placed directly above the claim it governs (so it never renders) and lints
+it against four rules:
+
+```html
+<!-- EVIDENCE id=nat-ceiling rung=established n=6
+     blind="no ISP-side view; cannot separate upstream shaping from local NAT exhaustion"
+     detector=validated depends=saturation-test -->
+The router has a hard NAT ceiling that becomes a cliff at ~100 Mbps.
+```
+
+The rung vocabulary, low to high: **suspected** (a hypothesis — fine to publish as low confidence,
+just say so), **supported** (evidence points this way, one vantage point, blind spot named),
+**established** (multiple independent *episodes* agree, and `n=` says how many — a thousand
+samples inside one episode is n=1 with good resolution, and the tool has no way to tell the
+difference except trusting what you write), **refuted** (you were wrong — mark it, don't delete
+it, so the next reader doesn't re-derive the same dead end).
+
+```bash
+node evidence.mjs docs/*.md              # check
+node evidence.mjs --json <paths>         # machine-readable, for a CI check
+node evidence.mjs --graph <paths>        # print the dependency chain
+node evidence.mjs --min-n 5 <paths>      # stricter episode floor
+node evidence.mjs --require <paths>      # every path MUST carry >=1 claim
+```
+
+What it enforces: a claim needs a stated rung (E4); `established` needs a stated, sufficient
+episode count (E2); `supported` and above must name what the measurement can't see (E3); a claim
+resting on a detector never proven to fire is capped below `established` (E1); and a claim
+`depends=`-ing on something now `rung=refuted` is flagged `E5-MUST-REOPEN` — a refuted conclusion
+takes its exclusions with it, and re-checking that is the step people skip because it feels like
+going backwards. Dangling citations, duplicate ids, and dependency cycles are caught too. Scanning
+zero files exits 2, not a clean 0 — "nothing was examined" and "nothing was wrong" must not read
+the same.
+
+Also ships as a [Claude Code skill](https://code.claude.com/docs/en/skills) at
+[`skills/evidence/`](skills/evidence/), same self-contained/drift-tested pattern as `hinge.mjs`.
+
+**What this does not prove.** Evidence only checks that a claim *states* its confidence honestly
+and consistently with its own stated inputs — it cannot verify the claim is actually true, cannot
+tell a real episode count from an invented one, and cannot judge whether the named blind spot is
+the right one. It is a linter for epistemic bookkeeping, not an oracle.
+
+`evidence.mjs` was workshopped between a Claude Code session and a Codex session, the same
+multi-agent-verified-by-hand process as the rest of this repo. The messages that carried that
+back-and-forth were relayed by a sibling project,
+[the-wire](https://github.com/CCortorreal/the-wire) — a small local message broker for exactly
+that kind of cross-agent handoff.
 
 ## git-safe-push.mjs — don't ship someone else's commits
 

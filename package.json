@@ -11,9 +11,10 @@
   "bin": {
     "witness": "./witness.mjs",
     "hinge": "./hinge.mjs",
+    "evidence": "./evidence.mjs",
     "git-safe-push": "./git-safe-push.mjs"
   },
   "scripts": {
-    "test": "node --test test/witness.test.mjs test/hinge.test.mjs test/skill.test.mjs"
+    "test": "node --test test/witness.test.mjs test/hinge.test.mjs test/evidence.test.mjs test/skill.test.mjs test/docs-scrub.test.mjs"
   }
 }
